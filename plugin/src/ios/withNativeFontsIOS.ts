@@ -114,39 +114,52 @@ const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, optio
 
     console.log(`Target UUID: ${targetUuid}`)
 
-    // Find the target's actual resources build phase (may have a non-standard comment)
+    // Find the target's actual resources build phase (may have a non-standard comment).
+    // This is needed because extension targets (e.g. widgets) may have their resources build
+    // phase created with a non-standard comment like "Embed Foundation Extensions" instead of
+    // "Resources", which causes the xcode library's addToPbxResourcesBuildPhase to fall back
+    // to the main app target's build phase.
     const resourcesBuildPhase = getResourcesBuildPhaseForTarget(project, targetUuid)
 
     for (const filePath of fontFiles) {
         const fontPath = path.join('Fonts', filePath)
+        const basename = path.basename(filePath)
         console.log(`Adding resource file ${fontPath}`)
 
-        // Add file reference to the project
-        const file = {
-            basename: path.basename(filePath),
-            path: fontPath,
-            fileRef: project.generateUuid(),
-            uuid: project.generateUuid(),
-            group: 'Resources',
-            target: targetUuid,
-            lastKnownFileType: 'file',
-            sourceTree: '"<group>"',
-        }
+        const fileRef = project.generateUuid()
+        const buildFileUuid = project.generateUuid()
 
         // Add to PBXFileReference section
-        project.addToPbxFileReferenceSection(file)
+        const fileRefSection = project.pbxFileReferenceSection()
+        fileRefSection[fileRef] = {
+            isa: 'PBXFileReference',
+            name: `"${basename}"`,
+            path: `"${fontPath}"`,
+            sourceTree: '"<group>"',
+            lastKnownFileType: 'unknown',
+            includeInIndex: 0,
+        }
+        fileRefSection[`${fileRef}_comment`] = basename
 
         // Add to PBXBuildFile section
-        project.addToPbxBuildFileSection(file)
+        const buildFileSection = project.pbxBuildFileSection()
+        buildFileSection[buildFileUuid] = {
+            isa: 'PBXBuildFile',
+            fileRef: fileRef,
+            fileRef_comment: basename,
+        }
+        buildFileSection[`${buildFileUuid}_comment`] = `${basename} in Resources`
 
         // Add to the target's resources build phase directly
         if (resourcesBuildPhase) {
             resourcesBuildPhase.files.push({
-                value: file.uuid,
-                comment: `${file.basename} in Resources`,
+                value: buildFileUuid,
+                comment: `${basename} in Resources`,
             })
+            console.log(`Added ${basename} to existing resources build phase for target ${targetName}`)
         } else {
             // Fallback: create a new resources build phase for this target
+            console.log(`No resources build phase found for target ${targetName}, creating one`)
             project.addBuildPhase(
                 [fontPath],
                 'PBXResourcesBuildPhase',
@@ -157,13 +170,24 @@ const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, optio
             )
         }
 
-        // Add to the Resources PBXGroup
-        const resourcesGroup = project.pbxGroupByName('Resources')
-        if (resourcesGroup) {
-            resourcesGroup.children.push({
-                value: file.fileRef,
-                comment: file.basename,
+        // Add file reference to the widget target's PBXGroup
+        const targetGroup = project.pbxGroupByName(targetName)
+        if (targetGroup) {
+            targetGroup.children.push({
+                value: fileRef,
+                comment: basename,
             })
+            console.log(`Added ${basename} to group ${targetName}`)
+        } else {
+            // Fallback to the main Resources group
+            const resourcesGroup = project.pbxGroupByName('Resources')
+            if (resourcesGroup) {
+                resourcesGroup.children.push({
+                    value: fileRef,
+                    comment: basename,
+                })
+                console.log(`Added ${basename} to Resources group`)
+            }
         }
     }
 
