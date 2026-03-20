@@ -41,6 +41,7 @@ const updateXcodeProject = (config: ExportedConfigWithProps<XcodeProject>, optio
 
     for (const target of targets) {
         const fonts = grouped[target]
+        copyFontFilesToTarget(config, options, target, fonts)
         addFontToXcodeProj(config, options, target, fonts)
     }
 
@@ -260,6 +261,29 @@ const updateInfoPlist = (config: ExportedConfigWithProps<XcodeProject>, options:
     }
 
     return config
+}
+
+const copyFontFilesToTarget = (config: ExportedConfigWithProps<XcodeProject>, options: ExpoNativeFontsOptions, targetName: string, fonts: ExpoNativeFontOptions[]) => {
+    const { projectRoot } = config.modRequest
+    const sourceDir = path.join(projectRoot, options.srcFolder)
+    const targetFontsDir = path.join(projectRoot, 'ios', targetName, 'Fonts')
+
+    if (!fsExtra.existsSync(targetFontsDir)) {
+        fsExtra.mkdirSync(targetFontsDir, { recursive: true })
+    }
+
+    for (const font of fonts) {
+        const src = path.join(sourceDir, font.filePath)
+        const dest = path.join(targetFontsDir, font.filePath)
+        const destDir = path.dirname(dest)
+
+        if (!fsExtra.existsSync(destDir)) {
+            fsExtra.mkdirSync(destDir, { recursive: true })
+        }
+
+        fsExtra.copySync(src, dest)
+        console.log(`Copied ${font.filePath} to ${targetName}/Fonts/`)
+    }
 }
 
 const copyFontFiles = (config: ExportedConfigWithProps<XcodeProject>, { srcFolder }: ExpoNativeFontsOptions) => {
