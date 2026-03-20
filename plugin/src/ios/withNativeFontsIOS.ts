@@ -61,16 +61,40 @@ const getPBXTargetByName = (project: XcodeProject, name: string) => {
 
     for (const uuid in targetSection) {
         const target = targetSection[uuid]
-        
+
         if (target.name === name) {
             return {
                 uuid,
                 target,
             }
-        }    
+        }
     }
 
     return { target: null, uuid: null }
+}
+
+/**
+ * Find the PBXResourcesBuildPhase for a specific target, regardless of its comment name.
+ * This is needed because extension targets (e.g. widgets) may have their resources build phase
+ * created with a non-standard comment (e.g. "Embed Foundation Extensions" instead of "Resources"),
+ * which causes the xcode library's addToPbxResourcesBuildPhase to fall back to the main app target.
+ */
+const getResourcesBuildPhaseForTarget = (project: XcodeProject, targetUuid: string) => {
+    const target = project.pbxNativeTargetSection()[targetUuid]
+    if (!target || !target.buildPhases) {
+        return null
+    }
+
+    const pbxResourcesBuildPhaseSection = project.hash.project.objects['PBXResourcesBuildPhase']
+
+    for (const phase of target.buildPhases) {
+        const phaseUuid = phase.value
+        if (pbxResourcesBuildPhaseSection[phaseUuid]) {
+            return pbxResourcesBuildPhaseSection[phaseUuid]
+        }
+    }
+
+    return null
 }
 
 const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, options: ExpoNativeFontsOptions, targetName: string, fonts: ExpoNativeFontOptions[]) => {
@@ -85,21 +109,62 @@ const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, optio
     const { target, uuid: targetUuid } = getPBXTargetByName(project, targetName)
 
     if (!target || !targetUuid) {
-        throw new Error(`expo-native-fonts:: cannot find target ${targetName}. Has the target been set up correctly?`)
+        throw new Error(`expo-native-fonts:: cannot find target "${targetName}". If this target is created by another plugin (e.g. expo-widgets), ensure that plugin is listed AFTER expo-native-fonts in your app config plugins array so the target is created first.`)
     }
 
     console.log(`Target UUID: ${targetUuid}`)
 
+    // Find the target's actual resources build phase (may have a non-standard comment)
+    const resourcesBuildPhase = getResourcesBuildPhaseForTarget(project, targetUuid)
+
     for (const filePath of fontFiles) {
-        console.log(`Adding resource file ${filePath}`)
-        IOSConfig.XcodeUtils.addResourceFileToGroup({
-            filepath: path.join('Fonts', filePath),
-            groupName: 'Resources',
-            project,
-            isBuildFile: true,
-            verbose: true,
-            targetUuid,
-        });
+        const fontPath = path.join('Fonts', filePath)
+        console.log(`Adding resource file ${fontPath}`)
+
+        // Add file reference to the project
+        const file = {
+            basename: path.basename(filePath),
+            path: fontPath,
+            fileRef: project.generateUuid(),
+            uuid: project.generateUuid(),
+            group: 'Resources',
+            target: targetUuid,
+            lastKnownFileType: 'file',
+            sourceTree: '"<group>"',
+        }
+
+        // Add to PBXFileReference section
+        project.addToPbxFileReferenceSection(file)
+
+        // Add to PBXBuildFile section
+        project.addToPbxBuildFileSection(file)
+
+        // Add to the target's resources build phase directly
+        if (resourcesBuildPhase) {
+            resourcesBuildPhase.files.push({
+                value: file.uuid,
+                comment: `${file.basename} in Resources`,
+            })
+        } else {
+            // Fallback: create a new resources build phase for this target
+            project.addBuildPhase(
+                [fontPath],
+                'PBXResourcesBuildPhase',
+                'Resources',
+                targetUuid,
+                'app_extension',
+                '',
+            )
+        }
+
+        // Add to the Resources PBXGroup
+        const resourcesGroup = project.pbxGroupByName('Resources')
+        if (resourcesGroup) {
+            resourcesGroup.children.push({
+                value: file.fileRef,
+                comment: file.basename,
+            })
+        }
     }
 
     console.log('Resource files copied successfully.')
