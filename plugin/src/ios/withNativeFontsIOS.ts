@@ -41,6 +41,7 @@ const updateXcodeProject = (config: ExportedConfigWithProps<XcodeProject>, optio
 
     for (const target of targets) {
         const fonts = grouped[target]
+        copyFontFilesToTarget(config, options, target, fonts)
         addFontToXcodeProj(config, options, target, fonts)
     }
 
@@ -61,16 +62,40 @@ const getPBXTargetByName = (project: XcodeProject, name: string) => {
 
     for (const uuid in targetSection) {
         const target = targetSection[uuid]
-        
+
         if (target.name === name) {
             return {
                 uuid,
                 target,
             }
-        }    
+        }
     }
 
     return { target: null, uuid: null }
+}
+
+/**
+ * Find the PBXResourcesBuildPhase for a specific target, regardless of its comment name.
+ * This is needed because extension targets (e.g. widgets) may have their resources build phase
+ * created with a non-standard comment (e.g. "Embed Foundation Extensions" instead of "Resources"),
+ * which causes the xcode library's addToPbxResourcesBuildPhase to fall back to the main app target.
+ */
+const getResourcesBuildPhaseForTarget = (project: XcodeProject, targetUuid: string) => {
+    const target = project.pbxNativeTargetSection()[targetUuid]
+    if (!target || !target.buildPhases) {
+        return null
+    }
+
+    const pbxResourcesBuildPhaseSection = project.hash.project.objects['PBXResourcesBuildPhase']
+
+    for (const phase of target.buildPhases) {
+        const phaseUuid = phase.value
+        if (pbxResourcesBuildPhaseSection[phaseUuid]) {
+            return pbxResourcesBuildPhaseSection[phaseUuid]
+        }
+    }
+
+    return null
 }
 
 const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, options: ExpoNativeFontsOptions, targetName: string, fonts: ExpoNativeFontOptions[]) => {
@@ -85,21 +110,86 @@ const addFontToXcodeProj = (config: ExportedConfigWithProps<XcodeProject>, optio
     const { target, uuid: targetUuid } = getPBXTargetByName(project, targetName)
 
     if (!target || !targetUuid) {
-        throw new Error(`expo-native-fonts:: cannot find target ${targetName}. Has the target been set up correctly?`)
+        throw new Error(`expo-native-fonts:: cannot find target "${targetName}". If this target is created by another plugin (e.g. expo-widgets), ensure that plugin is listed AFTER expo-native-fonts in your app config plugins array so the target is created first.`)
     }
 
     console.log(`Target UUID: ${targetUuid}`)
 
+    // Find the target's actual resources build phase (may have a non-standard comment).
+    // This is needed because extension targets (e.g. widgets) may have their resources build
+    // phase created with a non-standard comment like "Embed Foundation Extensions" instead of
+    // "Resources", which causes the xcode library's addToPbxResourcesBuildPhase to fall back
+    // to the main app target's build phase.
+    const resourcesBuildPhase = getResourcesBuildPhaseForTarget(project, targetUuid)
+
     for (const filePath of fontFiles) {
-        console.log(`Adding resource file ${filePath}`)
-        IOSConfig.XcodeUtils.addResourceFileToGroup({
-            filepath: path.join('Fonts', filePath),
-            groupName: 'Resources',
-            project,
-            isBuildFile: true,
-            verbose: true,
-            targetUuid,
-        });
+        const fontPath = path.join('Fonts', filePath)
+        const basename = path.basename(filePath)
+        console.log(`Adding resource file ${fontPath}`)
+
+        const fileRef = project.generateUuid()
+        const buildFileUuid = project.generateUuid()
+
+        // Add to PBXFileReference section
+        const fileRefSection = project.pbxFileReferenceSection()
+        fileRefSection[fileRef] = {
+            isa: 'PBXFileReference',
+            name: `"${basename}"`,
+            path: `"${fontPath}"`,
+            sourceTree: '"<group>"',
+            lastKnownFileType: 'unknown',
+            includeInIndex: 0,
+        }
+        fileRefSection[`${fileRef}_comment`] = basename
+
+        // Add to PBXBuildFile section
+        const buildFileSection = project.pbxBuildFileSection()
+        buildFileSection[buildFileUuid] = {
+            isa: 'PBXBuildFile',
+            fileRef: fileRef,
+            fileRef_comment: basename,
+        }
+        buildFileSection[`${buildFileUuid}_comment`] = `${basename} in Resources`
+
+        // Add to the target's resources build phase directly
+        if (resourcesBuildPhase) {
+            resourcesBuildPhase.files.push({
+                value: buildFileUuid,
+                comment: `${basename} in Resources`,
+            })
+            console.log(`Added ${basename} to existing resources build phase for target ${targetName}`)
+        } else {
+            // Fallback: create a new resources build phase for this target
+            console.log(`No resources build phase found for target ${targetName}, creating one`)
+            project.addBuildPhase(
+                [fontPath],
+                'PBXResourcesBuildPhase',
+                'Resources',
+                targetUuid,
+                'app_extension',
+                '',
+            )
+        }
+
+        // Add file reference to the widget target's PBXGroup
+        const targetGroup = project.pbxGroupByName(targetName)
+        if (targetGroup) {
+            targetGroup.children.push({
+                value: fileRef,
+                comment: basename,
+            })
+            console.log(`Added ${basename} to group ${targetName}`)
+        } else {
+            // Fallback to the main Resources group
+            const resourcesGroup = project.pbxGroupByName('Resources')
+            if (resourcesGroup) {
+                resourcesGroup.children.push({
+                    value: fileRef,
+                    comment: basename,
+                })
+                console.log(`Added ${basename} to Resources group`)
+            }
+        }
     }
 
     console.log('Resource files copied successfully.')
@@ -171,6 +261,29 @@ const updateInfoPlist = (config: ExportedConfigWithProps<XcodeProject>, options:
     }
 
     return config
+}
+
+const copyFontFilesToTarget = (config: ExportedConfigWithProps<XcodeProject>, options: ExpoNativeFontsOptions, targetName: string, fonts: ExpoNativeFontOptions[]) => {
+    const { projectRoot } = config.modRequest
+    const sourceDir = path.join(projectRoot, options.srcFolder)
+    const targetFontsDir = path.join(projectRoot, 'ios', targetName, 'Fonts')
+
+    if (!fsExtra.existsSync(targetFontsDir)) {
+        fsExtra.mkdirSync(targetFontsDir, { recursive: true })
+    }
+
+    for (const font of fonts) {
+        const src = path.join(sourceDir, font.filePath)
+        const dest = path.join(targetFontsDir, font.filePath)
+        const destDir = path.dirname(dest)
+
+        if (!fsExtra.existsSync(destDir)) {
+            fsExtra.mkdirSync(destDir, { recursive: true })
+        }
+
+        fsExtra.copySync(src, dest)
+        console.log(`Copied ${font.filePath} to ${targetName}/Fonts/`)
+    }
 }
 
 const copyFontFiles = (config: ExportedConfigWithProps<XcodeProject>, { srcFolder }: ExpoNativeFontsOptions) => {

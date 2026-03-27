@@ -32,3 +32,17 @@ srcFolder should relative path from your project root to the fonts folder.
 fonts is an array of fonts to inject
 
 Each item of fonts must have the file path, the targets it is to be injected into and the platform. Android is not yet supported.
+
+## Plugin Ordering
+
+If your target is created by another config plugin (e.g. `@bittingz/expo-widgets`), `@bittingz/expo-native-fonts` **must be listed before** the plugin that creates the target. Expo's mod system executes `withXcodeProject` callbacks in reverse registration order (LIFO), so the plugin listed last runs first.
+
+```
+// ✅ Correct - expo-widgets is listed last so it runs first and creates the target
+["@bittingz/expo-native-fonts", { ... }],
+["@bittingz/expo-widgets", { ... }],
+
+// ❌ Wrong - expo-native-fonts runs first, target doesn't exist yet
+["@bittingz/expo-widgets", { ... }],
+["@bittingz/expo-native-fonts", { ... }],
+```
